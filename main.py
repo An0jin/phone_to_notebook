@@ -1,13 +1,14 @@
 import os
+import shutil
 import socket
 import threading
-import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import RedirectResponse
+
 import uvicorn
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import RedirectResponse
 
 UPLOAD_DIR = Path("저장된 파일")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -15,110 +16,79 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 def get_local_ip() -> str:
     try:
-        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8",80))
+        with socket.create_connection(("8.8.8.8", 53), timeout=1) as s:
             return s.getsockname()[0]
-    except Exception:
+    except OSError:
         return "127.0.0.1"
-    
 
 
-LOCAL_IP = get_local_ip()
-SERVER_URL = f"http://{LOCAL_IP}:8000"
+def unique_path(filename: str | None) -> Path:
+    base = UPLOAD_DIR / (Path(filename or "").name or "uploaded_file")
+    path, i = base, 1
+    while path.exists():
+        path = UPLOAD_DIR / f"{base.stem}({i}){base.suffix}"
+        i += 1
+    return path
+
+
+SERVER_URL = f"http://{get_local_ip()}:8000"
 
 app = FastAPI(
-    title="휴대폰 → 노트북 파일 전송",
-    description=f"""
-- 휴대폰과 노트북이 **같은 와이파이**에 연결되어 있어야 합니다.
-- 노트북에 **랜선이 꽂혀 있다면 뽑아 주세요.**
-- 휴대폰 브라우저에서 **이 주소(`{SERVER_URL}`)**에 접속하세요.
-
-1. **POST /upload** 클릭
-2. 오른쪽 **Try it out** 클릭
-3. **파일 선택**으로 파일 고르기
-4. **Execute** 클릭 → 노트북 **`uploads` 폴더**에 저장됨
-""",
-    version="1.0.0",
+    title="📱 휴대폰 → 노트북 파일 전송",
+    description=(
+        f"- 휴대폰과 노트북이 **같은 와이파이**에 연결되어 있어야 합니다.\n"
+        f"- 노트북에 **랜선**이 꽂혀 있다면 뽑아 주세요.\n"
+        f"- 휴대폰 브라우저 접속 주소: **`{SERVER_URL}`**\n\n"
+        f"### 사용 방법\n"
+        f"1. 아래 **파일 선택** 버튼을 눌러 보낼 파일 고르기\n"
+        f"2. 파란색 **Execute** 버튼 누르기 → 노트북 **`{UPLOAD_DIR.name}`** 폴더에 저장!"
+    ),
+    swagger_ui_parameters={
+        "docExpansion": "full",
+        "tryItOutEnabled": True,
+        "defaultModelsExpandDepth": -1,
+    },
 )
 
 
-@app.post(
-    "/upload",
-    summary="파일 보내기",
-    description="파일을 고르고 **Execute**를 누르면 `uploads` 폴더에 저장됩니다.",
-)
-async def upload(file: UploadFile = File(..., description="보낼 파일 선택")):
-    safe_name = Path(file.filename).name if file.filename else "uploaded_file"
-    dest_path = UPLOAD_DIR / safe_name
-
-    if dest_path.exists():
-        stem = dest_path.stem
-        suffix = dest_path.suffix
-        idx = 1
-        while dest_path.exists():
-            dest_path = UPLOAD_DIR / f"{stem}({idx}){suffix}"
-            idx += 1
-
+@app.post("/upload", summary="파일 보내기")
+def upload(file: UploadFile = File(..., description="보낼 파일 선택")):
+    dest = unique_path(file.filename)
     try:
-        with open(dest_path, "wb") as f:
-            f.write(await file.read())
-    except Exception as e:
+        with dest.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+    except OSError as e:
         raise HTTPException(status_code=500, detail=f"저장 실패: {e}")
     finally:
-        await file.close()
-
-    return {"저장_완료": dest_path.name}
+        file.file.close()
+    return {"저장_완료": dest.name, "저장_폴더": UPLOAD_DIR.name}
 
 
 @app.exception_handler(404)
-def error(request: Request, exc):
+def to_docs(_, __):
     return RedirectResponse("/docs")
 
 
-def open_browser_later():
-    time.sleep(1.2)
-    webbrowser.open(SERVER_URL)
-
-
-def run_server():
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="warning",
-        log_config=None,
-    )
-
-
-def stop_server():
-    os._exit(0)
-
-
-def start_control_window():
+def start_window():
+    stop = lambda: os._exit(0)
     root = tk.Tk()
     root.title("파일 전송 서버")
-    root.geometry("290x150")
+    root.geometry("320x170")
     root.resizable(False, False)
-
-    tk.Label(
-        root,
-        text=f"휴대폰 접속 주소:\n{SERVER_URL}",
-        pady=12,
-    ).pack()
-
-    tk.Button(
-        root,
-        text="서버 끄기",
-        command=stop_server,
-        width=18,
-        height=2,
-    ).pack()
-
-    root.protocol("WM_DELETE_WINDOW", stop_server)
+    tk.Label(root, text="휴대폰 브라우저에 아래 주소를 입력하세요", pady=8).pack()
+    tk.Label(root, text=SERVER_URL, font=("", 13, "bold"), fg="#2563eb").pack()
+    tk.Label(root, text=f"저장 폴더: {UPLOAD_DIR.name}", fg="#6b7280", pady=6).pack()
+    tk.Button(root, text="서버 끄기", command=stop, width=18, height=2).pack(pady=6)
+    root.protocol("WM_DELETE_WINDOW", stop)
     root.mainloop()
 
 
 if __name__ == "__main__":
-    threading.Thread(target=run_server, daemon=True).start()
-    threading.Thread(target=open_browser_later, daemon=True).start()
-    start_control_window()
+    threading.Thread(
+        target=uvicorn.run,
+        args=(app,),
+        kwargs={"host": "0.0.0.0", "port": 8000, "log_level": "warning", "log_config": None},
+        daemon=True,
+    ).start()
+    threading.Timer(1.2, webbrowser.open, args=[SERVER_URL]).start()
+    start_window()
